@@ -6,6 +6,7 @@ from typing import Optional
 
 import click
 from flask import current_app
+from sqlalchemy import select
 from werkzeug.exceptions import NotFound
 
 from configs import dify_config
@@ -26,7 +27,7 @@ from models.dataset import Dataset, DatasetCollectionBinding, DatasetMetadata, D
 from models.dataset import Document as DatasetDocument
 from models.model import Account, App, AppAnnotationSetting, AppMode, Conversation, MessageAnnotation
 from models.provider import Provider, ProviderModel
-from services.account_service import RegisterService, TenantService
+from services.account_service import AccountService, RegisterService, TenantService
 from services.clear_free_plan_tenant_expired_logs import ClearFreePlanTenantExpiredLogs
 from services.plugin.data_migration import PluginDataMigration
 from services.plugin.plugin_migration import PluginMigration
@@ -67,6 +68,7 @@ def reset_password(email, new_password, password_confirm):
     account.password = base64_password_hashed
     account.password_salt = base64_salt
     db.session.commit()
+    AccountService.reset_login_error_rate_limit(email)
     click.echo(click.style("Password reset successfully.", fg="green"))
 
 
@@ -279,6 +281,7 @@ def migrate_knowledge_vector_database():
         VectorType.ELASTICSEARCH,
         VectorType.OPENGAUSS,
         VectorType.TABLESTORE,
+        VectorType.MATRIXONE,
     }
     lower_collection_vector_types = {
         VectorType.ANALYTICDB,
@@ -297,11 +300,11 @@ def migrate_knowledge_vector_database():
     page = 1
     while True:
         try:
-            datasets = (
-                Dataset.query.filter(Dataset.indexing_technique == "high_quality")
-                .order_by(Dataset.created_at.desc())
-                .paginate(page=page, per_page=50)
+            stmt = (
+                select(Dataset).filter(Dataset.indexing_technique == "high_quality").order_by(Dataset.created_at.desc())
             )
+
+            datasets = db.paginate(select=stmt, page=page, per_page=50, max_per_page=50, error_out=False)
         except NotFound:
             break
 
@@ -444,13 +447,13 @@ def convert_to_agent_apps():
             WHERE a.mode = 'chat'
             AND am.agent_mode is not null
             AND (
-				am.agent_mode like '%"strategy": "function_call"%'
+                am.agent_mode like '%"strategy": "function_call"%'
                 OR am.agent_mode  like '%"strategy": "react"%'
-			)
+            )
             AND (
-				am.agent_mode like '{"enabled": true%'
+                am.agent_mode like '{"enabled": true%'
                 OR am.agent_mode like '{"max_iteration": %'
-			) ORDER BY a.created_at DESC LIMIT 1000
+            ) ORDER BY a.created_at DESC LIMIT 1000
         """
 
         with db.engine.begin() as conn:
@@ -551,11 +554,12 @@ def old_metadata_migration():
     page = 1
     while True:
         try:
-            documents = (
-                DatasetDocument.query.filter(DatasetDocument.doc_metadata is not None)
+            stmt = (
+                select(DatasetDocument)
+                .filter(DatasetDocument.doc_metadata.is_not(None))
                 .order_by(DatasetDocument.created_at.desc())
-                .paginate(page=page, per_page=50)
             )
+            documents = db.paginate(select=stmt, page=page, per_page=50, max_per_page=50, error_out=False)
         except NotFound:
             break
         if not documents:
@@ -592,11 +596,15 @@ def old_metadata_migration():
                             )
                             db.session.add(dataset_metadata_binding)
                         else:
-                            dataset_metadata_binding = DatasetMetadataBinding.query.filter(
-                                DatasetMetadataBinding.dataset_id == document.dataset_id,
-                                DatasetMetadataBinding.document_id == document.id,
-                                DatasetMetadataBinding.metadata_id == dataset_metadata.id,
-                            ).first()
+                            dataset_metadata_binding = (
+                                db.session.query(DatasetMetadataBinding)  # type: ignore
+                                .filter(
+                                    DatasetMetadataBinding.dataset_id == document.dataset_id,
+                                    DatasetMetadataBinding.document_id == document.id,
+                                    DatasetMetadataBinding.metadata_id == dataset_metadata.id,
+                                )
+                                .first()
+                            )
                             if not dataset_metadata_binding:
                                 dataset_metadata_binding = DatasetMetadataBinding(
                                     tenant_id=document.tenant_id,
@@ -668,7 +676,7 @@ def upgrade_db():
             click.echo(click.style("Starting database migration.", fg="green"))
 
             # run db migration
-            import flask_migrate  # type: ignore
+            import flask_migrate
 
             flask_migrate.upgrade()
 
@@ -818,8 +826,9 @@ def clear_free_plan_tenant_expired_logs(days: int, batch: int, tenant_ids: list[
     click.echo(click.style("Clear free plan tenant expired logs completed.", fg="green"))
 
 
+@click.option("-f", "--force", is_flag=True, help="Skip user confirmation and force the command to execute.")
 @click.command("clear-orphaned-file-records", help="Clear orphaned file records.")
-def clear_orphaned_file_records():
+def clear_orphaned_file_records(force: bool):
     """
     Clear orphaned file records in the database.
     """
@@ -839,13 +848,24 @@ def clear_orphaned_file_records():
         {"type": "text", "table": "workflow_node_executions", "column": "outputs"},
         {"type": "text", "table": "conversations", "column": "introduction"},
         {"type": "text", "table": "conversations", "column": "system_instruction"},
+        {"type": "text", "table": "accounts", "column": "avatar"},
+        {"type": "text", "table": "apps", "column": "icon"},
+        {"type": "text", "table": "sites", "column": "icon"},
         {"type": "json", "table": "messages", "column": "inputs"},
         {"type": "json", "table": "messages", "column": "message"},
     ]
 
     # notify user and ask for confirmation
     click.echo(
-        click.style("This command will find and delete orphaned file records in the following tables:", fg="yellow")
+        click.style(
+            "This command will first find and delete orphaned file records from the message_files table,", fg="yellow"
+        )
+    )
+    click.echo(
+        click.style(
+            "and then it will find and delete orphaned file records in the following tables:",
+            fg="yellow",
+        )
     )
     for files_table in files_tables:
         click.echo(click.style(f"- {files_table['table']}", fg="yellow"))
@@ -878,11 +898,55 @@ def clear_orphaned_file_records():
             fg="yellow",
         )
     )
-    click.confirm("Do you want to proceed?", abort=True)
+    if not force:
+        click.confirm("Do you want to proceed?", abort=True)
 
     # start the cleanup process
     click.echo(click.style("Starting orphaned file records cleanup.", fg="white"))
 
+    # clean up the orphaned records in the message_files table where message_id doesn't exist in messages table
+    try:
+        click.echo(
+            click.style("- Listing message_files records where message_id doesn't exist in messages table", fg="white")
+        )
+        query = (
+            "SELECT mf.id, mf.message_id "
+            "FROM message_files mf LEFT JOIN messages m ON mf.message_id = m.id "
+            "WHERE m.id IS NULL"
+        )
+        orphaned_message_files = []
+        with db.engine.begin() as conn:
+            rs = conn.execute(db.text(query))
+            for i in rs:
+                orphaned_message_files.append({"id": str(i[0]), "message_id": str(i[1])})
+
+        if orphaned_message_files:
+            click.echo(click.style(f"Found {len(orphaned_message_files)} orphaned message_files records:", fg="white"))
+            for record in orphaned_message_files:
+                click.echo(click.style(f"  - id: {record['id']}, message_id: {record['message_id']}", fg="black"))
+
+            if not force:
+                click.confirm(
+                    (
+                        f"Do you want to proceed "
+                        f"to delete all {len(orphaned_message_files)} orphaned message_files records?"
+                    ),
+                    abort=True,
+                )
+
+            click.echo(click.style("- Deleting orphaned message_files records", fg="white"))
+            query = "DELETE FROM message_files WHERE id IN :ids"
+            with db.engine.begin() as conn:
+                conn.execute(db.text(query), {"ids": tuple([record["id"] for record in orphaned_message_files])})
+            click.echo(
+                click.style(f"Removed {len(orphaned_message_files)} orphaned message_files records.", fg="green")
+            )
+        else:
+            click.echo(click.style("No orphaned message_files records found. There is nothing to delete.", fg="green"))
+    except Exception as e:
+        click.echo(click.style(f"Error deleting orphaned message_files records: {str(e)}", fg="red"))
+
+    # clean up the orphaned records in the rest of the *_files tables
     try:
         # fetch file id and keys from each table
         all_files_in_tables = []
@@ -964,7 +1028,8 @@ def clear_orphaned_file_records():
     click.echo(click.style(f"Found {len(orphaned_files)} orphaned file records.", fg="white"))
     for file in orphaned_files:
         click.echo(click.style(f"- orphaned file id: {file}", fg="black"))
-    click.confirm(f"Do you want to proceed to delete all {len(orphaned_files)} orphaned file records?", abort=True)
+    if not force:
+        click.confirm(f"Do you want to proceed to delete all {len(orphaned_files)} orphaned file records?", abort=True)
 
     # delete orphaned records for each file
     try:
@@ -979,8 +1044,9 @@ def clear_orphaned_file_records():
     click.echo(click.style(f"Removed {len(orphaned_files)} orphaned file records.", fg="green"))
 
 
+@click.option("-f", "--force", is_flag=True, help="Skip user confirmation and force the command to execute.")
 @click.command("remove-orphaned-files-on-storage", help="Remove orphaned files on the storage.")
-def remove_orphaned_files_on_storage():
+def remove_orphaned_files_on_storage(force: bool):
     """
     Remove orphaned files on the storage.
     """
@@ -1028,7 +1094,8 @@ def remove_orphaned_files_on_storage():
             fg="yellow",
         )
     )
-    click.confirm("Do you want to proceed?", abort=True)
+    if not force:
+        click.confirm("Do you want to proceed?", abort=True)
 
     # start the cleanup process
     click.echo(click.style("Starting orphaned files cleanup.", fg="white"))
@@ -1069,7 +1136,8 @@ def remove_orphaned_files_on_storage():
     click.echo(click.style(f"Found {len(orphaned_files)} orphaned files.", fg="white"))
     for file in orphaned_files:
         click.echo(click.style(f"- orphaned file: {file}", fg="black"))
-    click.confirm(f"Do you want to proceed to remove all {len(orphaned_files)} orphaned files?", abort=True)
+    if not force:
+        click.confirm(f"Do you want to proceed to remove all {len(orphaned_files)} orphaned files?", abort=True)
 
     # delete orphaned files
     removed_files = 0
