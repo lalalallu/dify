@@ -67,7 +67,6 @@ const Panel: FC<NodePanelProps<ParameterExtractorNodeType>> = ({
             popupClassName='!w-[387px]'
             isInWorkflow
             isAdvancedMode={true}
-            mode={model?.mode}
             provider={model?.provider}
             completionParams={model?.completion_params}
             modelId={model?.name}
@@ -190,12 +189,17 @@ const Panel: FC<NodePanelProps<ParameterExtractorNodeType>> = ({
               <VarItem
                 name='__is_success'
                 type={VarType.number}
-                description={t(`${i18nPrefix}.isSuccess`)}
+                description={t(`${i18nPrefix}.outputVars.isSuccess`)}
               />
               <VarItem
                 name='__reason'
                 type={VarType.string}
-                description={t(`${i18nPrefix}.errorReason`)}
+                description={t(`${i18nPrefix}.outputVars.errorReason`)}
+              />
+              <VarItem
+                name='__usage'
+                type='object'
+                description={t(`${i18nPrefix}.outputVars.usage`)}
               />
             </>
           </OutputVars>

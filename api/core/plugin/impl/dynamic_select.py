@@ -1,9 +1,9 @@
 from collections.abc import Mapping
 from typing import Any
 
-from core.plugin.entities.plugin import GenericProviderID
 from core.plugin.entities.plugin_daemon import PluginDynamicSelectOptionsResponse
 from core.plugin.impl.base import BasePluginClient
+from models.provider_ids import GenericProviderID
 
 
 class DynamicSelectClient(BasePluginClient):
@@ -15,6 +15,7 @@ class DynamicSelectClient(BasePluginClient):
         provider: str,
         action: str,
         credentials: Mapping[str, Any],
+        credential_type: str,
         parameter: str,
     ) -> PluginDynamicSelectOptionsResponse:
         """
@@ -29,6 +30,7 @@ class DynamicSelectClient(BasePluginClient):
                 "data": {
                     "provider": GenericProviderID(provider).provider_name,
                     "credentials": credentials,
+                    "credential_type": credential_type,
                     "provider_action": action,
                     "parameter": parameter,
                 },
@@ -42,4 +44,4 @@ class DynamicSelectClient(BasePluginClient):
         for options in response:
             return options
 
-        raise ValueError("Plugin service returned no options")
+        raise ValueError(f"Plugin service returned no options for parameter '{parameter}' in provider '{provider}'")

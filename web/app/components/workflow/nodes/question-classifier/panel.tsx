@@ -40,6 +40,7 @@ const Panel: FC<NodePanelProps<QuestionClassifierNodeType>> = ({
     handleVisionResolutionChange,
     handleVisionResolutionEnabledChange,
     filterVar,
+    handleSortTopic,
   } = useConfig(id, data)
 
   const model = inputs.model
@@ -55,7 +56,6 @@ const Panel: FC<NodePanelProps<QuestionClassifierNodeType>> = ({
             popupClassName='!w-[387px]'
             isInWorkflow
             isAdvancedMode={true}
-            mode={model?.mode}
             provider={model?.provider}
             completionParams={model.completion_params}
             modelId={model.name}
@@ -89,18 +89,14 @@ const Panel: FC<NodePanelProps<QuestionClassifierNodeType>> = ({
           config={inputs.vision?.configs}
           onConfigChange={handleVisionResolutionChange}
         />
-        <Field
-          title={t(`${i18nPrefix}.class`)}
-          required
-        >
-          <ClassList
-            nodeId={id}
-            list={inputs.classes}
-            onChange={handleTopicsChange}
-            readonly={readOnly}
-            filterVar={filterVar}
-          />
-        </Field>
+        <ClassList
+          nodeId={id}
+          list={inputs.classes}
+          onChange={handleTopicsChange}
+          readonly={readOnly}
+          filterVar={filterVar}
+          handleSortTopic={handleSortTopic}
+        />
         <Split />
       </div>
       <FieldCollapse
@@ -128,6 +124,11 @@ const Panel: FC<NodePanelProps<QuestionClassifierNodeType>> = ({
               name='class_name'
               type='string'
               description={t(`${i18nPrefix}.outputVars.className`)}
+            />
+            <VarItem
+              name='usage'
+              type='object'
+              description={t(`${i18nPrefix}.outputVars.usage`)}
             />
           </>
         </OutputVars>
